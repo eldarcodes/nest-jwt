@@ -4,16 +4,16 @@ import { AuthDto } from './dto/auth.dto';
 import * as bcrypt from 'bcrypt';
 import { Tokens } from './types/tokens.interface';
 import PrismaErrors from 'src/prisma/enum/prismaErrors.enum';
+import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
 
 @Injectable()
 export class AuthService {
-  constructor(private readonly prismaService: PrismaService) {}
-
-  hashData(data: string) {
-    const saltOrRounds = 10;
-
-    return bcrypt.hash(data, saltOrRounds);
-  }
+  constructor(
+    private readonly prismaService: PrismaService,
+    private readonly jwtService: JwtService,
+    private readonly configService: ConfigService,
+  ) {}
 
   async register(authDto: AuthDto): Promise<Tokens> {
     const hashedPassword = await this.hashData(authDto.password);
@@ -25,6 +25,11 @@ export class AuthService {
           hash: hashedPassword,
         },
       });
+
+      const tokens = await this.getTokens(newUser.id, newUser.email);
+      await this.updateRefreshTokenHash(newUser.id, tokens.refresh_token);
+
+      return tokens;
     } catch (error) {
       if (error?.code === PrismaErrors.UniqueViolation) {
         throw new HttpException(
@@ -38,8 +43,6 @@ export class AuthService {
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
-
-    return { access_token: '', refresh_token: '' };
   }
 
   async login() {
@@ -52,5 +55,56 @@ export class AuthService {
 
   async refresh() {
     return null;
+  }
+
+  hashData(data: string) {
+    const saltOrRounds = 10;
+
+    return bcrypt.hash(data, saltOrRounds);
+  }
+
+  async getTokens(userId: number, email: string): Promise<Tokens> {
+    const [accessToken, refreshToken] = await Promise.all([
+      await this.jwtService.signAsync(
+        {
+          sub: userId,
+          email,
+        },
+        {
+          secret: this.configService.get('JWT_ACCESS_TOKEN_SECRET'),
+          expiresIn: this.configService.get('JWT_ACCESS_TOKEN_EXPIRATION_TIME'),
+        },
+      ),
+      await this.jwtService.signAsync(
+        {
+          sub: userId,
+          email,
+        },
+        {
+          secret: this.configService.get('JWT_REFRESH_TOKEN_SECRET'),
+          expiresIn: this.configService.get(
+            'JWT_REFRESH_TOKEN_EXPIRATION_TIME',
+          ),
+        },
+      ),
+    ]);
+
+    return {
+      access_token: accessToken,
+      refresh_token: refreshToken,
+    };
+  }
+
+  async updateRefreshTokenHash(userId: number, refreshToken: string) {
+    const hash = await this.hashData(refreshToken);
+
+    await this.prismaService.user.update({
+      where: {
+        id: userId,
+      },
+      data: {
+        hashedRt: hash,
+      },
+    });
   }
 }
